@@ -1,0 +1,722 @@
+diff --git a/src/config.c b/src/config.c
+index 3557fb0..c420902 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -614,6 +614,26 @@ static int parse_command(const char *s, struct command *command)
+ 	return 0;
+ }
+ 
++static uint8_t get_layer_list_op(const char *fn)
++{
++	if (!strcmp(fn, "oneshotl"))
++		return OP_ONESHOTL;
++	if (!strcmp(fn, "togglel"))
++		return OP_TOGGLEL;
++	if (!strcmp(fn, "swapl"))
++		return OP_SWAPL;
++	if (!strcmp(fn, "layerl"))
++		return OP_LAYERL;
++	if (!strcmp(fn, "overloadl"))
++		return OP_OVERLOADL;
++	if (!strcmp(fn, "overloadtl"))
++		return OP_OVERLOAD_TIMEOUTL;
++	if (!strcmp(fn, "overloadt2l"))
++		return OP_OVERLOAD_TIMEOUT_TAPL;
++
++	return 0;
++}
++
+ static int parse_descriptor(char *s,
+ 			    struct descriptor *d,
+ 			    struct config *config)
+@@ -710,6 +730,152 @@ static int parse_descriptor(char *s,
+ 			}
+ 		}
+ 
++    if (!strcmp(fn, "lettermodl")) {
++      int j;
++      int nr_layers;
++
++      if (nargs < 2 || nargs > MAX_DESCRIPTOR_ARGS) {
++        err("%s requires at least 2 arguments", fn);
++        return -1;
++      }
++
++      nr_layers = nargs - 1;
++
++      /*
++       * Build:
++       *
++       * overloadi(ACTION, timeout(overloadt2l(LAYER1, LAYER2, ..., ACTION), 500, ACTION), 125)
++       */
++
++      buf[0] = '\0';
++
++      /* overloadi(ACTION, timeout(overloadt2l(... */
++      snprintf(buf, sizeof buf,
++        "overloadi(%s, timeout(overloadt2l(",
++        args[nr_layers]);
++
++      /* layer arguments */
++      for (j = 0; j < nr_layers; j++) {
++        size_t len = strlen(buf);
++
++        snprintf(buf + len, sizeof buf - len,
++          "%s%s",
++          j ? ", " : "",
++          args[j]);
++      }
++
++      /* action, timeout, action, final timeout */
++      {
++        size_t len = strlen(buf);
++
++        snprintf(buf + len, sizeof buf - len,
++          ", %s), 500, %s), 125)",
++          args[nr_layers],
++          args[nr_layers]);
++      }
++
++        printf("Generated: %s\n", buf);
++
++      if (parse_fn(buf, &fn, args, &nargs)) {
++        err("failed to parse %s", buf);
++        return -1;
++      }
++    }
++
++    uint8_t op = get_layer_list_op(fn);
++
++    if (op) {
++      int j;
++      int layer_arg = 0;
++      int has_action = (op == OP_OVERLOAD_TIMEOUTL || op == OP_OVERLOAD_TIMEOUT_TAPL || op == OP_OVERLOADL);
++      int action_arg = -1;
++      size_t min_args = has_action ? 2 : 1;
++
++      if (nargs < min_args || nargs > MAX_DESCRIPTOR_ARGS) {
++        err("%s requires %zu to %d arguments",
++            fn, min_args, MAX_DESCRIPTOR_ARGS);
++        return -1;
++      }
++
++      d->op = op;
++      d->double_pressed = 0;
++      d->nr_layers = 0;
++
++      for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++)
++        d->args[j].idx = -1;
++
++      /*
++       * For overloadt2l:
++       *
++       *     overloadt2l(layer ..., [double], action)
++       *
++       * The last argument is always the action.
++       */
++      if (has_action)
++        action_arg = nargs - 1;
++
++      for (j = 0; j < (int)nargs; j++) {
++        int16_t li;
++
++        /*
++         * Last argument is the action.
++         * Store it after all layer arguments:
++         *
++         * args[0 ... nr_layers-1] = layers
++         * args[nr_layers]         = action
++         */
++        if (j == action_arg) {
++          struct descriptor desc;
++
++          if (parse_descriptor(args[j], &desc, config))
++            return -1;
++
++          if (config->nr_descriptors >= ARRAY_SIZE(config->descriptors)) {
++            err("maximum descriptors exceeded");
++            return -1;
++          }
++
++          config->descriptors[config->nr_descriptors] = desc;
++          d->args[layer_arg].idx = config->nr_descriptors++;
++          continue;
++        }
++
++        /* "double" is a flag, not a layer argument. */
++        if (!strcmp(args[j], "double")) {
++          d->double_pressed = 1;
++          continue;
++        }
++
++        if (!strcmp(args[j], "main")) {
++          err("the main layer cannot be used in %s", fn);
++          return -1;
++        }
++
++        li = config_get_layer_index(config, args[j]);
++
++        if (li == -1 || config->layers[li].type == LT_LAYOUT) {
++          err("%s is not a valid layer", args[j]);
++          return -1;
++        }
++
++        if (layer_arg >= MAX_DESCRIPTOR_ARGS) {
++          err("too many layers in %s", fn);
++          return -1;
++        }
++
++        d->args[layer_arg++].idx = li;
++      }
++
++      if (layer_arg == 0) {
++        err("%s requires at least one layer", fn);
++        return -1;
++      }
++
++      d->nr_layers = layer_arg;
++
++      return 0;
++    }
++
+ 		for (i = 0; i < ARRAY_SIZE(actions); i++) {
+ 			if (!strcmp(actions[i].name, fn)) {
+ 				int j;
+@@ -1029,6 +1195,7 @@ static void config_init(struct config *config)
+ 	config->chord_interkey_timeout = 50;
+ 	config->chord_hold_timeout = 0;
+ 	config->oneshot_timeout = 0;
++  config->overload_tap_timeout = 300;
+ 
+ 	config->macro_timeout = 600;
+ 	config->macro_repeat_timeout = 50;
+diff --git a/src/config.h b/src/config.h
+index f09f800..ec2f143 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -57,6 +57,14 @@ enum op {
+ 	OP_SCROLL_TOGGLE_OFF,
+ 	OP_SCROLL_TOGGLE,
+ 	OP_SCROLL,
++
++	OP_ONESHOTL,
++	OP_TOGGLEL,
++	OP_SWAPL,
++	OP_LAYERL,
++	OP_OVERLOADL,
++	OP_OVERLOAD_TIMEOUTL,
++	OP_OVERLOAD_TIMEOUT_TAPL,
+ };
+ 
+ union descriptor_arg {
+@@ -73,6 +81,8 @@ union descriptor_arg {
+ struct descriptor {
+ 	enum op op;
+ 	union descriptor_arg args[MAX_DESCRIPTOR_ARGS];
++  uint8_t double_pressed;
++  uint8_t nr_layers;
+ };
+ 
+ struct chord {
+diff --git a/src/keyboard.c b/src/keyboard.c
+index 97797c3..d31b9d6 100644
+--- a/src/keyboard.c
++++ b/src/keyboard.c
+@@ -418,6 +418,9 @@ static void clear_oneshot(struct keyboard *kbd)
+ 			kbd->layer_state[i].oneshot_depth--;
+ 		}
+ 
++  if (!kbd->key_pressed)
++      kbd->double_pressed = 0;
++
+ 	kbd->oneshot_latch = 0;
+ 	kbd->oneshot_timeout = 0;
+ }
+@@ -488,6 +491,42 @@ static long calculate_main_loop_timeout(struct keyboard *kbd, long time)
+ 	return timeout ? timeout - time : 0;
+ }
+ 
++static void process_overload_toggles(struct keyboard *kbd,
++				     struct overload_state *ov,
++				     long time)
++{
++
++	for (size_t i = 0;
++	     i < kbd->config.nr_layers;
++	     i++) {
++
++		if (!ov->toggled[i])
++			continue;
++
++
++		if (!ov->other_key_pressed) {
++			if (kbd->layer_state[i].toggled) {
++				kbd->layer_state[i].toggled = 0;
++				kbd->layer_state[i].oneshot_depth++;
++
++				if (kbd->config.oneshot_timeout) {
++					kbd->oneshot_timeout =
++						time + kbd->config.oneshot_timeout;
++
++					schedule_timeout(
++						kbd,
++						kbd->oneshot_timeout);
++				}
++			}
++		} else {
++			kbd->layer_state[i].toggled = 0;
++			deactivate_layer(kbd, i);
++			ov->toggled[i] = 0;
++      kbd->double_pressed = 0;
++		}
++	}
++}
++
+ static long process_descriptor(struct keyboard *kbd, uint8_t code,
+ 			       const struct descriptor *d, int dl,
+ 			       int pressed, long time)
+@@ -538,6 +577,11 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
+ 			kbd->last_repeatable_action.args[1].mods = active_mods;
+ 
+ 			send_key(kbd, new_code, 1);
++
++      if (kbd->double_pressed) {
++        send_key(kbd, new_code, 0);
++        send_key(kbd, new_code, 1);
++      }
+ 			clear_oneshot(kbd);
+ 		} else {
+ 			send_key(kbd, new_code, 0);
+@@ -842,8 +886,374 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
+ 		}
+ 
+ 		break;
+-	}
++  case OP_ONESHOTL: {
++      int j;
++
++      if (pressed) {
++        if (d->double_pressed) {
++            kbd->key_pressed = 1;
++            kbd->double_pressed = 1;
++          }
++
++        for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++          idx = d->args[j].idx;
++          if (idx == -1)
++            break;
++          activate_layer(kbd, code, idx);
++        }
++
++        update_mods(kbd, dl, 0);
++        kbd->oneshot_latch = 1;
++      } else {
++        if (d->double_pressed) {
++            kbd->key_pressed = 0;
++          }
++
++        if (kbd->oneshot_latch) {
++          for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++            idx = d->args[j].idx;
++            if (idx == -1)
++              break;
++            kbd->layer_state[idx].oneshot_depth++;
++          }
++
++          if (kbd->config.oneshot_timeout) {
++            kbd->oneshot_timeout = time + kbd->config.oneshot_timeout;
++            schedule_timeout(kbd, kbd->oneshot_timeout);
++          }
++        } else {
++          if (d->double_pressed) {
++              kbd->key_pressed = 0;
++              kbd->double_pressed = 0;
++            }
++
++          for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++            idx = d->args[j].idx;
++            if (idx == -1)
++              break;
++            deactivate_layer(kbd, idx);
++          }
++
++          update_mods(kbd, -1, 0);
++        }
++      }
++
++      break;
++  }
++  case OP_TOGGLEL: {
++      int j;
++
++      if (pressed) {
++
++        struct overload_state *ov = NULL;
++
++        if (kbd->overload_depth > 0)
++          ov = &kbd->overload_stack[kbd->overload_depth - 1];
++
++        for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++          idx = d->args[j].idx;
++          if (idx == -1)
++            break;
++
++          fprintf(stderr,
++            "[OP_TOGGLEL] name=%s  depth=%d\n",
++            kbd->config.layers[idx].name,
++            kbd->overload_depth);
++
++          kbd->layer_state[idx].toggled = !kbd->layer_state[idx].toggled;
++
++          if (kbd->layer_state[idx].toggled) {
++              activate_layer(kbd, code, idx);
++
++              if (d->double_pressed) {
++                  kbd->key_pressed = 1;
++                  kbd->double_pressed = 1;
++                }
++
++              if (ov)
++                ov->toggled[idx] = 1;
++
++          } else {
++              deactivate_layer(kbd, idx);
++              if (d->double_pressed) {
++                  kbd->key_pressed = 0;
++                  kbd->double_pressed = 0;
++                }
++
++              if (ov)
++                ov->toggled[idx] = 0;
++          }
++        }
++
++        update_mods(kbd, -1, 0);
++        clear_oneshot(kbd);
++      }
++      break;
++  }
++  case OP_SWAPL: {
++      int j;
++
++      if (pressed) {
++        size_t i;
++        struct cache_entry *ce = NULL;
++
++        if (d->double_pressed) {
++            kbd->key_pressed = 1;
++            kbd->double_pressed = 1;
++          }
++
++        if (kbd->layer_state[dl].toggled) {
++          deactivate_layer(kbd, dl);
++          kbd->layer_state[dl].toggled = 0;
++
++          for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++            idx = d->args[j].idx;
++            if (idx == -1)
++              break;
++
++            activate_layer(kbd, code, idx);
++            kbd->layer_state[idx].toggled = 1;
++          }
++
++          update_mods(kbd, -1, 0);
++
++        } else if (kbd->layer_state[dl].oneshot_depth) {
++          deactivate_layer(kbd, dl);
++          kbd->layer_state[dl].oneshot_depth--;
++
++          for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++            idx = d->args[j].idx;
++            if (idx == -1)
++              break;
++
++            activate_layer(kbd, code, idx);
++            kbd->layer_state[idx].oneshot_depth++;
++          }
++
++          update_mods(kbd, -1, 0);
++
++        } else {
++          for (i = 0; i < CACHE_SIZE; i++) {
++            uint8_t code = kbd->cache[i].code;
++            int layer = kbd->cache[i].layer;
++            int type = kbd->config.layers[layer].type;
++
++            if (code && layer == dl &&
++                type == LT_NORMAL && layer != 0) {
++              ce = &kbd->cache[i];
++              break;
++            }
++          }
++
++          if (ce) {
++            ce->d.op = OP_LAYERL;
++            ce->d.double_pressed = d->double_pressed;
++
++            for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++)
++              ce->d.args[j].idx = d->args[j].idx;
++
++            deactivate_layer(kbd, dl);
++
++            for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++              idx = ce->d.args[j].idx;
++              if (idx == -1)
++                break;
++
++              activate_layer(kbd, ce->code, idx);
++            }
++
++            update_mods(kbd, -1, 0);
++          }
++        }
++      }
++
++      break;
++  }
++  case OP_LAYERL: {
++      int j;
++
++      if (pressed) {
++        struct overload_state *ov;
++
++        ov = &kbd->overload_stack[kbd->overload_depth++];
++
++        ov->start_time = time;
++        ov->active = 1;
++        ov->other_key_pressed = 0;
++
++        memset(ov->toggled, 0, sizeof(ov->toggled));
++
++        kbd->key_pressed = 1;
++
++        if (d->double_pressed)
++            kbd->double_pressed = 1;
++
++        for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++          idx = d->args[j].idx;
++          if (idx == -1)
++            break;
++
++          activate_layer(kbd, code, idx);
++        }
++
++      } else {
++        struct overload_state *ov;
+ 
++        ov = &kbd->overload_stack[kbd->overload_depth - 1];
++
++        kbd->key_pressed = 0;
++
++        if (d->double_pressed)
++            kbd->double_pressed = 0;
++
++        for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
++          idx = d->args[j].idx;
++          if (idx == -1)
++            break;
++
++          deactivate_layer(kbd, idx);
++        }
++
++        process_overload_toggles(kbd, ov, time);
++
++        ov->active = 0;
++        kbd->overload_depth--;
++      }
++
++      if (kbd->last_pressed_code == code) {
++        kbd->inhibit_modifier_guard = 1;
++        update_mods(kbd, -1, 0);
++        kbd->inhibit_modifier_guard = 0;
++      } else {
++        update_mods(kbd, -1, 0);
++      }
++
++      break;
++  }
++  case OP_OVERLOADL: {
++      int j;
++      int nr_layers = d->nr_layers;
++      action = &kbd->config.descriptors[d->args[nr_layers].idx];
++
++      if (pressed) {
++        struct overload_state *ov;
++
++        if (d->double_pressed) {
++            kbd->key_pressed = 1;
++            kbd->double_pressed = 1;
++          }
++
++        ov = &kbd->overload_stack[kbd->overload_depth++];
++
++        ov->start_time = time;
++        ov->active = 1;
++        ov->other_key_pressed = 0;
++
++        memset(ov->toggled, 0, sizeof(ov->toggled));
++
++          /*
++        fprintf(stderr,
++          "[OVERLOAD] PRESS code=%u depth=%d\n",
++          code,
++          kbd->overload_depth);
++          * */
++
++        for (j = 0; j < nr_layers; j++)
++          activate_layer(kbd, code, d->args[j].idx);
++
++        update_mods(kbd, -1, 0);
++
++      } else {
++        struct overload_state *ov;
++
++        if (kbd->overload_depth <= 0) {
++          fprintf(stderr,
++            "[OVERLOAD] RELEASE without context\n");
++          break;
++        }
++
++        if (d->double_pressed) {
++            kbd->double_pressed = 0;
++          }
++
++        ov = &kbd->overload_stack[kbd->overload_depth - 1];
++
++        long duration = time - ov->start_time;
++
++        int is_tap =
++          kbd->last_pressed_code == code &&
++          (!kbd->config.overload_tap_timeout ||
++           duration < kbd->config.overload_tap_timeout);
++
++        /*
++         * Remove the overload layers themselves.
++         */
++
++        for (j = 0; j < nr_layers; j++)
++          deactivate_layer(kbd, d->args[j].idx);
++
++        update_mods(kbd, -1, 0);
++
++        process_overload_toggles(kbd, ov, time);
++
++        if (is_tap) {
++            /*
++          fprintf(stderr,
++            "[OVERLOAD] >>> TAP depth=%d\n",
++            kbd->overload_depth);
++            * */
++
++          if (action->op == OP_MACRO) {
++            struct macro *macro = &kbd->config.macros[action->args[0].idx];
++            execute_macro(kbd, dl, macro);
++          } else {
++            kbd->overload_depth--;
++            process_descriptor(kbd, code, action, dl, 1, time);
++            process_descriptor(kbd, code, action, dl, 0, time);
++          }
++
++
++        } else {
++            kbd->key_pressed = 0;
++            kbd->overload_depth--;
++        }
++
++        // process_overload_toggles(kbd, ov, time);
++        ov->active = 0;
++
++      }
++
++      break;
++  }
++  case OP_OVERLOAD_TIMEOUT_TAPL:
++	case OP_OVERLOAD_TIMEOUTL:
++    if (pressed) {
++      int j;
++      int nr_layers = d->nr_layers;
++
++      struct descriptor *action = &kbd->config.descriptors[d->args[nr_layers].idx];
++
++      kbd->pending_overload.code = code;
++      kbd->pending_overload.resolve_on_interrupt = d->op == OP_OVERLOAD_TIMEOUT_TAPL;
++
++      kbd->pending_overload.dl = dl;
++      kbd->pending_overload.action1 = *action;
++
++      kbd->pending_overload.action2 = (struct descriptor){0};
++      kbd->pending_overload.action2.op = OP_LAYERL;
++      kbd->pending_overload.action2.double_pressed = d->double_pressed;
++
++      for (j = 0; j < nr_layers; j++)
++          kbd->pending_overload.action2.args[j].idx = d->args[j].idx;
++
++      kbd->pending_overload.action2.args[nr_layers].idx = -1;
++
++      kbd->pending_overload.expiration = time + kbd->config.overload_tap_timeout;
++
++      schedule_timeout(kbd, kbd->pending_overload.expiration);
++    }
++    break;
++	}
+ 	if (pressed)
+ 		kbd->last_pressed_code = code;
+ 
+@@ -1229,6 +1639,15 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long
+ 
+ 			lookup_descriptor(kbd, code, &d, &dl);
+ 
++      if (kbd->overload_depth > 0 &&
++          d.op != OP_TOGGLEL &&
++          d.op != OP_OVERLOAD_IDLE_TIMEOUT &&
++          d.op != OP_OVERLOADL) {
++
++        struct overload_state *ov = &kbd->overload_stack[kbd->overload_depth - 1];
++        ov->other_key_pressed = 1;
++      }
++
+ 			if (cache_set(kbd, code, &(struct cache_entry) { .d = d, .dl = dl, .layer = 0 }))
+ 				goto exit;
+ 		} else {
+diff --git a/src/keyboard.h b/src/keyboard.h
+index ed1b200..5766b25 100644
+--- a/src/keyboard.h
++++ b/src/keyboard.h
+@@ -35,6 +35,14 @@ struct output {
+ 	void (*on_layer_change) (const struct keyboard *kbd, const struct layer *layer, uint8_t active);
+ };
+ 
++struct overload_state {
++	long start_time;
++	int active;
++	int other_key_pressed;
++
++	uint8_t toggled[256];
++};
++
+ /* May correspond to more than one physical input device. */
+ struct keyboard {
+ 	const struct config *original_config;
+@@ -68,7 +76,7 @@ struct keyboard {
+ 	long last_simple_key_time;
+ 
+ 	long timeouts[128];
+-	size_t nr_timeouts; 
++	size_t nr_timeouts;
+ 
+ 	struct active_chord {
+ 		uint8_t active;
+@@ -128,6 +136,12 @@ struct keyboard {
+ 		uint8_t oneshot_depth;
+ 	} layer_state[MAX_LAYERS];
+ 
++  struct overload_state overload_stack[MAX_DESCRIPTOR_ARGS];
++  int overload_depth;
++
++  uint8_t key_pressed;
++  int double_pressed;
++
+ 	struct descriptor last_repeatable_action;
+ 
+ 	uint8_t keystate[256];

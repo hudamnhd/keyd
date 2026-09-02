@@ -1,0 +1,44 @@
+diff --git a/Makefile b/Makefile
+index dced80a..55a6ae2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -7,6 +7,9 @@ PREFIX?=/usr/local
+ CONFIG_DIR?=/etc/keyd
+ SOCKET_PATH=/var/run/keyd.socket
+ 
++INSTALL_USER := $(if $(SUDO_USER),$(SUDO_USER),$(USER))
++INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
++
+ CFLAGS:=-DVERSION=\"v$(VERSION)\ \($(COMMIT)\)\" \
+ 	-I/usr/local/include \
+ 	-L/usr/local/lib \
+@@ -50,7 +53,15 @@ man:
+ install:
+ 
+ 	@if [ -e /run/systemd/system -o "$(FORCE_SYSTEMD)" ]; then \
+-		sed -e 's#@PREFIX@#$(PREFIX)#' keyd.service.in > keyd.service; \
++		if [ "$(X11_ENV)" = "1" ]; then \
++			sed -e 's#@PREFIX@#$(PREFIX)#' \
++			    -e 's#@X11_ENV@#Environment="DISPLAY=:0"\nEnvironment="PATH=$(INSTALL_HOME)/.local/bin:/usr/local/bin:/usr/bin:/bin"\nEnvironment="XAUTHORITY=$(INSTALL_HOME)/.Xauthority"#' \
++			    keyd.service.in > keyd.service; \
++		else \
++			sed -e 's#@PREFIX@#$(PREFIX)#' \
++			    -e 's#@X11_ENV@##' \
++			    keyd.service.in > keyd.service; \
++		fi; \
+ 		mkdir -p $(DESTDIR)$(PREFIX)/lib/systemd/system/; \
+ 		install -Dm644 keyd.service $(DESTDIR)$(PREFIX)/lib/systemd/system/keyd.service; \
+ 		mkdir -p $(DESTDIR)$(PREFIX)/lib/sysusers.d/; \
+diff --git a/keyd.service.in b/keyd.service.in
+index a4c90bb..2aae983 100644
+--- a/keyd.service.in
++++ b/keyd.service.in
+@@ -4,6 +4,8 @@ Description=key remapping daemon
+ [Service]
+ Type=simple
+ ExecStart=@PREFIX@/bin/keyd
++ExecReload=@PREFIX@/bin/keyd reload
++@X11_ENV@
+ 
+ [Install]
+ WantedBy=multi-user.target

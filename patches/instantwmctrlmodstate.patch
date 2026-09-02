@@ -1,0 +1,95 @@
+diff --git a/src/daemon.c b/src/daemon.c
+index cf901eb..a49b0d6 100644
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -143,6 +143,81 @@ static void on_layer_change(const struct keyboard *kbd, const struct layer *laye
+ 	char buf[MAX_LAYER_NAME_LEN+2];
+ 	ssize_t bufsz;
+
++  static int mod_control = 0;
++  static int mod_shift   = 0;
++  static int mod_alt     = 0;
++
++  char mods[32];
++  int layer_idx = layer - kbd->config.layers;
++  int toggled = kbd->layer_state[layer_idx].toggled;
++  int oneshot = kbd->layer_state[layer_idx].oneshot_depth > 0;
++
++  if (strcasecmp(layer->name, "control") == 0) {
++    if (toggled)
++      mod_control = 1;
++    else
++      mod_control = 0;
++  }
++  else if (strcasecmp(layer->name, "shift") == 0) {
++    if (toggled)
++      mod_shift = 1;
++    else
++      mod_shift = 0;
++  }
++  else if (strcasecmp(layer->name, "alt") == 0) {
++    if (toggled)
++      mod_alt = 1;
++    else
++      mod_alt = 0;
++  }
++  else {
++		goto listeners;
++  }
++
++	mods[0] = '\0';
++
++	if (mod_control)
++		snprintf(mods + strlen(mods), sizeof(mods) - strlen(mods), "%scontrol", mods[0] ? "-" : "");
++
++	if (mod_shift)
++		snprintf(mods + strlen(mods), sizeof(mods) - strlen(mods), "%sshift", mods[0] ? "-" : "");
++
++	if (mod_alt)
++		snprintf(mods + strlen(mods), sizeof(mods) - strlen(mods), "%salt", mods[0] ? "-" : "");
++
++	{
++    static char last_mods[32] = "";
++    static unsigned long mod_updates = 0;
++
++    if (strcmp(mods, last_mods) != 0) {
++      snprintf(last_mods, sizeof(last_mods), "%s", mods);
++
++    fprintf(stderr,
++      "[LAYER_KEYD] update #%lu: \"%s\"\n",
++      mod_updates,
++      mods[0] ? mods : "(empty)");
++      mod_updates++;
++
++      pid_t pid = fork();
++
++      if (pid == 0) {
++          if (mods[0]) {
++              execlp("instantwmctrl", "instantwmctrl", "layerkeyd", mods, (char *)NULL);
++          } else {
++              execlp("instantwmctrl", "instantwmctrl", "layerkeyd", (char *)NULL);
++          }
++          _exit(127);
++
++      } else if (pid > 0) {
++          waitpid(pid, NULL, 0);
++      } else {
++          perror("fork");
++      }
++    }
++	}
++
++listeners:
++
+ 	int keep[ARRAY_SIZE(listeners)];
+ 	size_t n = 0;
+
+@@ -572,7 +647,7 @@ static int event_handler(struct event *ev)
+ 		} else if (ev->dev->is_virtual && ev->devev->type == DEV_LED) {
+ 			size_t i;
+
+-			/*
++			/*
+ 			 * Propagate LED events received by the virtual device from userspace
+ 			 * to all grabbed devices.
+ 			 *
