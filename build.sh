@@ -18,14 +18,10 @@ cd "$BUILD_DIR"
 
 echo "[2/7] Applying patches..."
 
-echo "  - X11"
-git apply "$PROJECT_DIR/patches/X11.patch"
-
-echo "  - Instantwmctrl mod state"
-git apply "$PROJECT_DIR/patches/instantwmctrlmodstate.patch"
-
-echo "  - Multilayer"
-git apply "$PROJECT_DIR/patches/multilayer.patch"
+for patch in "$PROJECT_DIR"/patches/*.patch; do
+    echo "  - $(basename "$patch")"
+    git apply "$patch"
+done
 
 echo "[3/7] Cleaning..."
 make clean
