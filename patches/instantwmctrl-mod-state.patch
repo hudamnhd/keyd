@@ -1,14 +1,15 @@
 diff --git a/src/daemon.c b/src/daemon.c
-index cf901eb..0cbc32b 100644
+index cf901eb..8c72b84 100644
 --- a/src/daemon.c
 +++ b/src/daemon.c
-@@ -143,6 +143,81 @@ static void on_layer_change(const struct keyboard *kbd, const struct layer *laye
+@@ -143,6 +143,91 @@ static void on_layer_change(const struct keyboard *kbd, const struct layer *laye
  	char buf[MAX_LAYER_NAME_LEN+2];
  	ssize_t bufsz;
  
 +	static int mod_control = 0;
 +	static int mod_shift   = 0;
 +	static int mod_alt     = 0;
++	static int mod_meta    = 0;
 +
 +	char mods[32];
 +	int layer_idx = layer - kbd->config.layers;
@@ -33,6 +34,12 @@ index cf901eb..0cbc32b 100644
 +	  else
 +	    mod_alt = 0;
 +	}
++	else if (strcasecmp(layer->name, "meta") == 0) {
++	  if (toggled)
++	    mod_meta = 1;
++	  else
++	    mod_meta = 0;
++	}
 +	else {
 +		goto listeners;
 +	}
@@ -47,6 +54,9 @@ index cf901eb..0cbc32b 100644
 +
 +	if (mod_alt)
 +		snprintf(mods + strlen(mods), sizeof(mods) - strlen(mods), "%salt", mods[0] ? "-" : "");
++
++	if (mod_meta)
++		snprintf(mods + strlen(mods), sizeof(mods) - strlen(mods), "%smeta", mods[0] ? "-" : "");
 +
 +	{
 +	  static char last_mods[32] = "";
@@ -84,7 +94,7 @@ index cf901eb..0cbc32b 100644
  	int keep[ARRAY_SIZE(listeners)];
  	size_t n = 0;
  
-@@ -572,7 +647,7 @@ static int event_handler(struct event *ev)
+@@ -572,7 +657,7 @@ static int event_handler(struct event *ev)
  		} else if (ev->dev->is_virtual && ev->devev->type == DEV_LED) {
  			size_t i;
  
