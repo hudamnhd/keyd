@@ -1,0 +1,62 @@
+diff --git a/src/vkbd/uinput.c b/src/vkbd/uinput.c
+index 785efa2..4c953fd 100644
+--- a/src/vkbd/uinput.c
++++ b/src/vkbd/uinput.c
+@@ -271,31 +271,32 @@ void vkbd_mouse_move(const struct vkbd *vkbd, int x, int y)
+ 
+ void vkbd_mouse_scroll(const struct vkbd *vkbd, int x, int y)
+ {
+-	struct input_event ev;
+-
+-	ev.type = EV_REL;
+-	ev.code = REL_WHEEL;
+-	ev.value = y;
+-
+-	ev.input_event_sec = 0;
+-	ev.input_event_usec = 0;
+-
+-	xwrite(vkbd->pfd, &ev, sizeof(ev));
+-
+-	ev.type = EV_REL;
+-	ev.code = REL_HWHEEL;
+-	ev.value = x;
+-
+-	ev.input_event_sec = 0;
+-	ev.input_event_usec = 0;
+-
+-	xwrite(vkbd->pfd, &ev, sizeof(ev));
+-
+-	ev.type = EV_SYN;
+-	ev.code = 0;
+-	ev.value = 0;
+-
+-	xwrite(vkbd->pfd, &ev, sizeof(ev));
++  struct input_event ev;
++
++  usleep(1000);
++
++  if (y) {
++      ev.type = EV_REL;
++      ev.code = REL_WHEEL;
++      ev.value = y;
++      ev.input_event_sec = 0;
++      ev.input_event_usec = 0;
++      xwrite(vkbd->pfd, &ev, sizeof(ev));
++  }
++
++  if (x) {
++      ev.type = EV_REL;
++      ev.code = REL_HWHEEL;
++      ev.value = x;
++      ev.input_event_sec = 0;
++      ev.input_event_usec = 0;
++      xwrite(vkbd->pfd, &ev, sizeof(ev));
++  }
++
++  ev.type = EV_SYN;
++  ev.code = SYN_REPORT;
++  ev.value = 0;
++  xwrite(vkbd->pfd, &ev, sizeof(ev));
+ }
+ 
+ void vkbd_mouse_move_abs(const struct vkbd *vkbd, int x, int y)
