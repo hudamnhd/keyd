@@ -488,6 +488,87 @@ static long calculate_main_loop_timeout(struct keyboard *kbd, long time)
 	return timeout ? timeout - time : 0;
 }
 
+static uint8_t reverse_key(uint8_t code)
+{
+	switch (code) {
+		REVERSE_KEY(KEYD_W, KEYD_B)
+		REVERSE_KEY(KEYD_N, KEYD_P)
+		REVERSE_KEY(KEYD_RIGHTBRACE, KEYD_LEFTBRACE)
+		REVERSE_KEY(KEYD_SEMICOLON, KEYD_COMMA)
+
+		REVERSE_KEY(KEYD_SCROLL_LEFT, KEYD_SCROLL_RIGHT)
+		REVERSE_KEY(KEYD_SCROLL_UP, KEYD_SCROLL_DOWN)
+		REVERSE_KEY(KEYD_UP, KEYD_DOWN)
+		REVERSE_KEY(KEYD_LEFT, KEYD_RIGHT)
+		REVERSE_KEY(KEYD_PAGEUP, KEYD_PAGEDOWN)
+		REVERSE_KEY(KEYD_HOME, KEYD_END)
+
+	default:
+		return code;
+	}
+}
+
+static void reverse_descriptor(struct keyboard *kbd, struct descriptor *d)
+{
+	if (d->op == OP_KEYSEQUENCE) {
+		REVERSE_SHIFT_KEY(KEYD_TAB);
+		REVERSE_SHIFT_KEY(KEYD_F3);
+		REVERSE_SHIFT_KEY(KEYD_Z);
+
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_RIGHTBRACE, KEYD_LEFTBRACE);
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_COMMA, KEYD_DOT);
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_3, KEYD_8);
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_4, KEYD_6);
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_0, KEYD_9);
+		REVERSE_MOD_KEY(MOD_SHIFT, KEYD_W, KEYD_B);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_F, KEYD_B);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_E, KEYD_A);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_N, KEYD_P);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_D, KEYD_U);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_G, KEYD_T);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_J, KEYD_K);
+		REVERSE_MOD_KEY(MOD_CTRL, KEYD_I, KEYD_O);
+
+		d->args[0].code = reverse_key(d->args[0].code);
+		return;
+	}
+
+	if (d->op == OP_MACRO && d->args[0].idx == REPEAT_MACRO_IDX) {
+		struct macro *macro = &kbd->config.macros[REPEAT_MACRO_IDX];
+
+		if (macro->sz == 2 && macro->entries[0].type == MACRO_KEYSEQUENCE) {
+			/*
+			 * Reverse:
+			 * ]b -> [b "|" [b -> ]b
+			 * C-a n -> C-a p "|" C-a p -> C-a n
+			 */
+			uint8_t prefix_code = macro->entries[0].data & 0xff;
+			uint8_t prefix_mods = (macro->entries[0].data >> 8) & 0xff;
+			uint8_t code = macro->entries[1].data & 0xff;
+			if (prefix_mods) {
+				code = reverse_key(code);
+				macro->entries[1].data = code | (macro->entries[1].data & 0xff00);
+			} else {
+				code = reverse_key(prefix_code);
+				macro->entries[0].data = code | (macro->entries[0].data & 0xff00);
+			}
+		}
+
+		d->args[0].idx = REPEAT_MACRO_IDX;
+	}
+}
+
+static int is_repeat_prefix(uint8_t code, uint8_t mods)
+{
+	if ((code == KEYD_LEFTBRACE || code == KEYD_RIGHTBRACE) && mods == 0)
+		return 1;
+
+	if (code == KEYD_B && (mods & MOD_CTRL))
+		return 1;
+
+	return 0;
+}
+
 static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			       const struct descriptor *d, int dl,
 			       int pressed, long time)
@@ -541,6 +622,28 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			clear_oneshot(kbd);
 		} else {
 			send_key(kbd, new_code, 0);
+
+			if (kbd->repeat_prefix_code) {
+				struct macro *macro = &kbd->config.macros[REPEAT_MACRO_IDX];
+				macro->sz = 2;
+
+				macro->entries[0].type = MACRO_KEYSEQUENCE;
+				macro->entries[0].data = kbd->repeat_prefix_code | ((uint16_t)kbd->repeat_prefix_mods << 8);
+
+				macro->entries[1].type = MACRO_KEYSEQUENCE;
+				macro->entries[1].data = new_code | ((uint16_t)kbd->last_repeatable_action.args[1].mods << 8);
+
+				kbd->last_repeatable_action.op = OP_MACRO;
+				kbd->last_repeatable_action.args[0].idx = REPEAT_MACRO_IDX;
+
+				kbd->repeat_prefix_code = 0;
+				kbd->repeat_prefix_mods = 0;
+
+			} else if (is_repeat_prefix(new_code, kbd->last_repeatable_action.args[1].mods)) {
+				kbd->repeat_prefix_code = new_code;
+				kbd->repeat_prefix_mods = kbd->last_repeatable_action.args[1].mods;
+			}
+
 			update_mods(kbd, -1, 0);
 		}
 
@@ -644,6 +747,19 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			for (i = 0; i < CACHE_SIZE; i++)
 				if (kbd->cache[i].code == code)
 					kbd->cache[i].d = kbd->last_repeatable_action;
+		}
+		break;
+	case OP_REPEAT_REVERSE:
+		if (pressed) {
+			struct descriptor original = kbd->last_repeatable_action;
+			kbd->repeat_reverse_action = original;
+			reverse_descriptor(kbd, &kbd->repeat_reverse_action);
+			process_descriptor(kbd, code, &kbd->repeat_reverse_action, dl, 1, time);
+			kbd->last_repeatable_action = original;
+		} else {
+			struct descriptor original = kbd->last_repeatable_action;
+			process_descriptor(kbd, code, &kbd->repeat_reverse_action, dl, 0, time);
+			kbd->last_repeatable_action = original;
 		}
 		break;
 	case OP_CLEAR:

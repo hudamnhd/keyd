@@ -103,6 +103,7 @@ static struct {
 	{ "setlayout", 	NULL,	OP_LAYOUT,	{ ARG_LAYOUT } },
 
 	{ "repeat", 	NULL,	OP_REPEAT,	{} },
+	{ "repeatreverse", 	NULL,	OP_REPEAT_REVERSE,	{} },
 
 	/* Experimental */
 	{ "scrollon", 	NULL,	OP_SCROLL_TOGGLE_ON,		{ARG_SENSITIVITY} },

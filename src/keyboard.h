@@ -12,6 +12,7 @@
 #include "config.h"
 #include "device.h"
 
+#define REPEAT_MACRO_IDX	254
 #define MAX_ACTIVE_KEYS	32
 #define CACHE_SIZE	16 //Effectively nkro
 
@@ -72,7 +73,7 @@ struct keyboard {
 	long taphold3_last_time;
 
 	long timeouts[128];
-	size_t nr_timeouts; 
+	size_t nr_timeouts;
 
 	struct active_chord {
 		uint8_t active;
@@ -133,6 +134,11 @@ struct keyboard {
 	} layer_state[MAX_LAYERS];
 
 	struct descriptor last_repeatable_action;
+	struct descriptor repeat_reverse_action;
+
+	uint8_t repeat_reverse_active;
+	uint8_t repeat_prefix_code;
+	uint8_t repeat_prefix_mods;
 
 	uint8_t keystate[256];
 

@@ -84,7 +84,7 @@ struct ipc_message {
 		IPC_RELOAD,
 		IPC_LAYER_LISTEN,
 	} type;
-	
+
 	uint32_t timeout;
 	char data[MAX_IPC_MESSAGE_SIZE];
 	size_t sz;
@@ -107,5 +107,28 @@ extern struct device device_table[MAX_DEVICES];
 extern size_t device_table_sz;
 
 void dbg_print_evdev_details(const char *path);
+
+#define REVERSE_KEY(a, b) \
+	case a: return b;      \
+	case b: return a;
+
+#define REVERSE_MOD_KEY(mod, a, b) \
+	if ((d)->args[1].mods & (mod)) { \
+		if ((d)->args[0].code == (a)) { \
+			(d)->args[0].code = (b); \
+			return; \
+		} \
+		if ((d)->args[0].code == (b)) { \
+			(d)->args[0].code = (a); \
+			return; \
+		} \
+	}
+
+#define REVERSE_SHIFT_KEY(key) \
+	if (d->args[0].code == (key)) { \
+		d->args[1].mods ^= MOD_SHIFT; \
+		return; \
+	}
+
 
 #endif
