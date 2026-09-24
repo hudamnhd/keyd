@@ -162,6 +162,7 @@ struct keyboard {
 	uint8_t repeat_prefix_mods;
 
 	uint8_t keystate[256];
+	uint8_t macro_loop;
 
 	struct {
 		int x;

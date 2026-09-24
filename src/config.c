@@ -111,6 +111,7 @@ static struct {
 	{ "scrolloff", 	NULL,	OP_SCROLL_TOGGLE_OFF,		{} },
 	{ "scrollt", 	NULL,	OP_SCROLL_TOGGLE,		{ARG_SENSITIVITY} },
 	{ "scroll", 	NULL,	OP_SCROLL,			{ARG_SENSITIVITY} },
+  { "loop", 	NULL,	OP_MACRO_LOOP,	{ ARG_DESCRIPTOR, ARG_TIMEOUT } },
 
 	/* TODO: deprecate */
 	{ "overload2", 	"overloadt",	OP_OVERLOAD_TIMEOUT,		{ ARG_LAYER, ARG_DESCRIPTOR, ARG_TIMEOUT } },

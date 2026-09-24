@@ -492,6 +492,17 @@ static void remove_toggle_idx(struct layer_trigger *lt, int idx)
 	}
 }
 
+static void descriptor_to_macro(struct keyboard *kbd, const struct descriptor *d, int dl, struct macro *macro)
+{
+	uint8_t code = d->args[0].code;
+	uint8_t mods = d->args[1].mods;
+	uint8_t active_mods = update_mods(kbd, dl, mods);
+
+	macro->sz = 1;
+	macro->entries[0].type = MACRO_KEYSEQUENCE;
+	macro->entries[0].data = code | ((uint16_t)active_mods << 8);
+}
+
 static void clear_oneshot(struct keyboard *kbd)
 {
 	size_t i = 0;
@@ -1139,6 +1150,66 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			}
 		}
 
+		break;
+	case OP_MACRO_LOOP:
+		if (pressed) {
+			struct layer_trigger *lt = NULL;
+			struct macro *macro_loop;
+			long execution_time;
+
+			action = &kbd->config.descriptors[d->args[0].idx];
+
+			/* Get current layer trigger */
+			if (kbd->layer_trigger_depth > 0)
+				lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+
+			/*
+			 * If the current layer trigger is toggled, process the
+			 * descriptor as both press and release.
+			 */
+			if (lt && lt->toggle_count > 0) {
+				process_descriptor(kbd, code, action, dl, 1, time);
+				process_descriptor(kbd, code, action, dl, 0, time);
+				break;
+			}
+
+			macro_loop = &kbd->config.macros[REPEAT_MACRO_IDX];
+
+			descriptor_to_macro(kbd, action, dl, macro_loop);
+
+			/*
+			 * Toggle macro loop state.
+			 *
+			 * In mouse mode, pressing the same key toggles the loop.
+			 * Pressing a different key starts the loop.
+			 *
+			 * In normal mode, every press toggles the loop.
+			 */
+
+			const char *name = kbd->config.layers[dl].name;
+
+			clear_oneshot(kbd);
+
+			if (kbd->last_pressed_output_code == action->args[0].code)
+				kbd->macro_loop = kbd->macro_loop ? 0 : dl;
+			else
+				kbd->macro_loop = dl;
+
+			/* Start macro execution if loop is enabled */
+			if (!kbd->macro_loop)
+				return 0;
+
+			execution_time = execute_macro(kbd, dl, macro_loop);
+
+			kbd->active_macro = macro_loop;
+			kbd->active_macro_layer = dl;
+
+			kbd->macro_repeat_interval = d->args[1].timeout;
+
+			kbd->macro_timeout = time + execution_time + kbd->macro_repeat_interval;
+
+			schedule_timeout(kbd, kbd->macro_timeout);
+		}
 		break;
 	case OP_PREFIX: {
 		int j;
@@ -1958,9 +2029,10 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 	}
 
 	if (kbd->active_macro) {
-		if (code) {
+		if (code && !kbd->macro_loop) {
 			kbd->active_macro = NULL;
 			update_mods(kbd, -1, 0);
+
 		} else if (time >= kbd->macro_timeout) {
 			long execution_time = execute_macro(kbd, kbd->active_macro_layer, kbd->active_macro);
 
