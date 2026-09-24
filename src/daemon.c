@@ -16,6 +16,9 @@ static int listeners[32];
 static size_t nr_listeners = 0;
 static struct keyboard *active_kbd = NULL;
 
+static int overlay_pipe = -1;
+static pid_t overlay_pid = -1;
+
 static void free_configs(void)
 {
 	struct config_ent *ent = configs;
@@ -138,27 +141,96 @@ fail:
 	return;
 }
 
+static void send_overlay(const char *mods)
+{
+	if (overlay_pipe == -1)
+		return;
+
+	char buf[256];
+
+	int len = snprintf(buf, sizeof(buf), "%s\n", mods);
+
+	if (len < 0 || (size_t)len >= sizeof(buf)) {
+		keyd_log("overlay message too long\n");
+		return;
+	}
+
+	ssize_t nw = write(overlay_pipe, buf, len);
+
+	if (nw < 0) {
+		if (errno == EPIPE) {
+			close(overlay_pipe);
+			overlay_pipe = -1;
+
+			keyd_log("overlay disconnected\n");
+			return;
+		}
+
+		perror("overlay write");
+	}
+}
+
 static void on_layer_change(const struct keyboard *kbd, const struct layer *layer, uint8_t state)
 {
+	static char last_overlay[32] = "";
+
 	size_t i;
-	char buf[MAX_LAYER_NAME_LEN+2];
+	size_t mods_len = 0;
 	ssize_t bufsz;
+
+	char buf[MAX_LAYER_NAME_LEN + 2];
+	char mods[32];
+
+	mods[0] = '\0';
+
+	for (i = 1; i < kbd->config.nr_layers; i++) {
+
+		const struct layer *l = &kbd->config.layers[i];
+
+		if (l->type != LT_LAYOUT) {
+			if (kbd->layer_state[i].toggled) {
+				/* Separator. */
+				if (mods_len > 0 && mods_len < sizeof(mods) - 1)
+					mods[mods_len++] = '-';
+
+				int n = snprintf(mods + mods_len, sizeof(mods) - mods_len, "%s", l->name);
+
+				if (n > 0) {
+					mods_len += n;
+
+					if (mods_len >= sizeof(mods))
+						mods_len = sizeof(mods) - 1;
+				}
+
+				mods[mods_len] = '\0';
+			}
+		}
+	}
+
+	if (!kbd->macro_loop) {
+		if (strcmp(last_overlay, mods) != 0) {
+			send_overlay(mods);
+			snprintf(last_overlay, sizeof(last_overlay), "%s", mods);
+		}
+	}
 
 	int keep[ARRAY_SIZE(listeners)];
 	size_t n = 0;
 
 	if (kbd->config.layer_indicator) {
 		int active_layers = 0;
-
-		for (i = 1; i < kbd->config.nr_layers; i++)
+		for (i = 1; i < kbd->config.nr_layers; i++) {
 			if (kbd->config.layers[i].type != LT_LAYOUT && kbd->layer_state[i].active) {
 				active_layers = 1;
 				break;
 			}
+		}
 
-		for (i = 0; i < device_table_sz; i++)
-			if (device_table[i].data == kbd)
+		for (i = 0; i < device_table_sz; i++) {
+			if (device_table[i].data == kbd) {
 				device_set_led(&device_table[i], 1, active_layers);
+			}
+		}
 	}
 
 	if (!nr_listeners)
@@ -214,6 +286,7 @@ static void load_configs(void)
 				struct output output = {
 					.send_key = send_key,
 					.on_layer_change = on_layer_change,
+					.send_overlay = send_overlay,
 				};
 				ent->kbd = new_keyboard(&ent->config, &output);
 
@@ -398,6 +471,51 @@ static int input(char *buf, size_t sz, uint32_t timeout)
 	return 0;
 }
 
+static int start_overlay(void)
+{
+	int pipefd[2];
+
+	if (overlay_pipe != -1)
+		return 0;
+
+	if (pipe(pipefd) == -1) {
+		perror("pipe");
+		return -1;
+	}
+
+	overlay_pid = fork();
+
+	if (overlay_pid < 0) {
+		perror("fork");
+		close(pipefd[0]);
+		close(pipefd[1]);
+		overlay_pid = -1;
+		return -1;
+	}
+
+	if (overlay_pid == 0) {
+		close(pipefd[1]);
+
+		if (dup2(pipefd[0], STDIN_FILENO) == -1)
+			_exit(1);
+
+		close(pipefd[0]);
+
+		execl("/usr/local/bin/keyd-overlay", "keyd-overlay", (char *)NULL);
+
+		perror("execl keyd-overlay");
+		_exit(127);
+	}
+
+	close(pipefd[0]);
+
+	overlay_pipe = pipefd[1];
+
+	keyd_log("overlay started (pid %d)\n", overlay_pid);
+
+	return 0;
+}
+
 static void handle_client(int con)
 {
 	struct ipc_message msg;
@@ -465,8 +583,21 @@ static void handle_client(int con)
 			send_success(con);
 		else
 			send_fail(con, "%s", errstr);
+		break;
+	case IPC_OVERLAY_START:
+		if (start_overlay())
+			send_fail(con, "failed to start overlay");
+		else
+			send_success(con);
+		break;
 
+	case IPC_OVERLAY_STOP:
+		if (overlay_pipe != -1) {
+			close(overlay_pipe);
+			overlay_pipe = -1;
+		}
 
+		send_success(con);
 		break;
 	default:
 		send_fail(con, "Unknown command");
@@ -573,7 +704,7 @@ static int event_handler(struct event *ev)
 		} else if (ev->dev->is_virtual && ev->devev->type == DEV_LED) {
 			size_t i;
 
-			/* 
+			/*
 			 * Propagate LED events received by the virtual device from userspace
 			 * to all grabbed devices.
 			 *
@@ -613,6 +744,7 @@ static int event_handler(struct event *ev)
 int run_daemon(int argc, char *argv[])
 {
 	struct sched_param sp;
+	signal(SIGPIPE, SIG_IGN);
 	ipcfd = ipc_create_server();
 
 	if (ipcfd < 0)

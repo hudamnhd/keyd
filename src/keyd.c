@@ -210,6 +210,16 @@ static int reload(int argc, char **argv)
 	return 0;
 }
 
+static int overlay_start(int argc, char **argv)
+{
+	return ipc_exec(IPC_OVERLAY_START, NULL, 0, 0);
+}
+
+static int overlay_stop(int argc, char **argv)
+{
+	return ipc_exec(IPC_OVERLAY_STOP, NULL, 0, 0);
+}
+
 struct {
 	const char *name;
 	const char *flag;
@@ -229,6 +239,8 @@ struct {
 
 	{"listen", "", "", layer_listen},
 
+	{"overlay-start", "", "", overlay_start},
+	{"overlay-stop", "", "", overlay_stop},
 	{"reload", "", "", reload},
 	{"list-keys", "", "", list_keys},
 };

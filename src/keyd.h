@@ -83,6 +83,8 @@ struct ipc_message {
 		IPC_MACRO,
 		IPC_RELOAD,
 		IPC_LAYER_LISTEN,
+		IPC_OVERLAY_START,
+		IPC_OVERLAY_STOP,
 	} type;
 
 	uint32_t timeout;

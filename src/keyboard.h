@@ -34,6 +34,7 @@ struct key_event {
 struct output {
 	void (*send_key) (uint8_t code, uint8_t state);
 	void (*on_layer_change) (const struct keyboard *kbd, const struct layer *layer, uint8_t active);
+	void (*send_overlay) (const char *mods);
 };
 
 struct layer_trigger {

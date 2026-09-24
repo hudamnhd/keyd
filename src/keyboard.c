@@ -1195,6 +1195,8 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			else
 				kbd->macro_loop = dl;
 
+			kbd->output.send_overlay(kbd->macro_loop ? "loop" : "");
+
 			/* Start macro execution if loop is enabled */
 			if (!kbd->macro_loop)
 				return 0;
