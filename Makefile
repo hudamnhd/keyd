@@ -7,6 +7,9 @@ PREFIX?=/usr/local
 CONFIG_DIR?=/etc/keyd
 SOCKET_PATH=/var/run/keyd.socket
 
+INSTALL_USER := $(if $(SUDO_USER),$(SUDO_USER),$(USER))
+INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
+
 CFLAGS:=-DVERSION=\"v$(VERSION)\ \($(COMMIT)\)\" \
 	-I/usr/local/include \
 	-L/usr/local/lib \
@@ -34,8 +37,9 @@ endif
 
 all:
 	mkdir -p bin
-	cp scripts/keyd-application-mapper bin/
 	$(CC) $(CFLAGS) -O3 $(COMPAT_FILES) src/*.c src/vkbd/$(VKBD).c -lpthread -o bin/keyd $(LDFLAGS)
+	$(CC) -O2 extensions/keyd-overlay.c -o bin/keyd-overlay -lX11
+	$(CC) -O2 -Wall -Wextra extensions/keyd-application-mapper.c -o bin/keyd-application-mapper -lX11
 debug:
 	CFLAGS="-g -fsanitize=address -Wunused" $(MAKE)
 compose:
@@ -50,7 +54,15 @@ man:
 install:
 
 	@if [ -e /run/systemd/system -o "$(FORCE_SYSTEMD)" ]; then \
-		sed -e 's#@PREFIX@#$(PREFIX)#' keyd.service.in > keyd.service; \
+		if [ "$(X11_ENV)" = "1" ]; then \
+			sed -e 's#@PREFIX@#$(PREFIX)#' \
+			    -e 's#@X11_ENV@#Environment="DISPLAY=:0"\nEnvironment="PATH=$(INSTALL_HOME)/.local/bin:/usr/local/bin:/usr/bin:/bin"\nEnvironment="XAUTHORITY=$(INSTALL_HOME)/.Xauthority"#' \
+			    keyd.service.in > keyd.service; \
+		else \
+			sed -e 's#@PREFIX@#$(PREFIX)#' \
+			    -e 's#@X11_ENV@##' \
+			    keyd.service.in > keyd.service; \
+		fi; \
 		mkdir -p $(DESTDIR)$(PREFIX)/lib/systemd/system/; \
 		install -Dm644 keyd.service $(DESTDIR)$(PREFIX)/lib/systemd/system/keyd.service; \
 		mkdir -p $(DESTDIR)$(PREFIX)/lib/sysusers.d/; \
@@ -73,7 +85,7 @@ install:
 	mkdir -p $(DESTDIR)$(PREFIX)/share/doc/keyd/
 	mkdir -p $(DESTDIR)$(PREFIX)/share/doc/keyd/examples/
 
-	-groupadd keyd
+	groupadd -f keyd
 	install -m755 bin/* $(DESTDIR)$(PREFIX)/bin/
 	install -m644 docs/*.md $(DESTDIR)$(PREFIX)/share/doc/keyd/
 	install -m644 examples/* $(DESTDIR)$(PREFIX)/share/doc/keyd/examples/
@@ -87,6 +99,7 @@ uninstall:
 	-groupdel keyd
 	rm -rf $(DESTDIR)$(PREFIX)/bin/keyd \
 		$(DESTDIR)$(PREFIX)/bin/keyd-application-mapper \
+		$(DESTDIR)$(PREFIX)/bin/keyd-overlay \
 		$(DESTDIR)$(PREFIX)/share/doc/keyd/ \
 		$(DESTDIR)$(PREFIX)/share/man/man1/keyd*.gz \
 		$(DESTDIR)$(PREFIX)/share/keyd/ \
