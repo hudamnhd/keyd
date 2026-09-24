@@ -10,7 +10,7 @@
 #include "macro.h"
 
 #define MAX_LAYER_NAME_LEN	64
-#define MAX_DESCRIPTOR_ARGS	3
+#define MAX_DESCRIPTOR_ARGS	5
 
 #define MAX_LAYERS		32
 #define MAX_EXP_LEN		512
@@ -59,6 +59,16 @@ enum op {
 	OP_SCROLL_TOGGLE_OFF,
 	OP_SCROLL_TOGGLE,
 	OP_SCROLL,
+	OP_PREFIX,
+	OP_PREFIXL,
+	OP_ONESHOTL,
+	OP_TOGGLEL,
+	OP_SWAPL,
+	OP_LAYERL,
+	OP_OVERLOADL,
+	OP_OVERLOAD_TIMEOUTL,
+	OP_OVERLOAD_TIMEOUT_TAPL,
+
 };
 
 union descriptor_arg {
@@ -73,6 +83,7 @@ union descriptor_arg {
 /* Describes the intended purpose of a key (corresponds to an 'action' in user parlance). */
 
 struct descriptor {
+	uint8_t nr_layers;
 	enum op op;
 	union descriptor_arg args[MAX_DESCRIPTOR_ARGS];
 };

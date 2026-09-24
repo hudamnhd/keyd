@@ -90,6 +90,7 @@ static struct {
 	{ "oneshotk", 	NULL,	OP_ONESHOTK,	{ ARG_LAYER, ARG_KEYSEQUENCE_DESCRIPTOR } },
 
 	{ "layer", 	NULL,	OP_LAYER,	{ ARG_LAYER } },
+	{ "prefix", 	NULL,	OP_PREFIX,	{ ARG_DESCRIPTOR } },
 
 	{ "overload", 	NULL,	OP_OVERLOAD,			{ ARG_LAYER, ARG_DESCRIPTOR } },
 	{ "overloadt", 	NULL,	OP_OVERLOAD_TIMEOUT,		{ ARG_LAYER, ARG_DESCRIPTOR, ARG_TIMEOUT } },
@@ -616,6 +617,27 @@ static int parse_command(const char *s, struct command *command)
 	return 0;
 }
 
+static uint8_t get_layer_list_op(const char *fn)
+{
+	if (!strcmp(fn, "oneshotl"))
+		return OP_ONESHOTL;
+	if (!strcmp(fn, "togglel"))
+		return OP_TOGGLEL;
+	if (!strcmp(fn, "swapl"))
+		return OP_SWAPL;
+	if (!strcmp(fn, "layerl"))
+		return OP_LAYERL;
+	if (!strcmp(fn, "prefixl"))
+		return OP_PREFIXL;
+	if (!strcmp(fn, "overloadl"))
+		return OP_OVERLOADL;
+	if (!strcmp(fn, "overloadtl"))
+		return OP_OVERLOAD_TIMEOUTL;
+	if (!strcmp(fn, "overloadt2l"))
+		return OP_OVERLOAD_TIMEOUT_TAPL;
+	return 0;
+}
+
 static int parse_descriptor(char *s,
 			    struct descriptor *d,
 			    struct config *config)
@@ -710,6 +732,136 @@ static int parse_descriptor(char *s,
 				err("failed to parse %s", buf);
 				return -1;
 			}
+		}
+
+		if (!strcmp(fn, "lettermodl")) {
+			int j;
+			int nr_layers;
+
+			if (nargs < 2 || nargs > MAX_DESCRIPTOR_ARGS) {
+				err("%s requires at least 2 arguments", fn);
+				return -1;
+			}
+
+			nr_layers = nargs - 1;
+
+			/*
+			 * Build:
+			 *
+			 * overloadi(ACTION, timeout(overloadt2l(LAYER1, LAYER2, ..., ACTION), 500, ACTION), 125)
+			 */
+
+			buf[0] = '\0';
+
+			/* overloadi(ACTION, timeout(overloadt2l(... */
+			snprintf(buf, sizeof buf, "overloadi(%s, timeout(overloadt2l(", args[nr_layers]);
+
+			/* layer arguments */
+			for (j = 0; j < nr_layers; j++) {
+				size_t len = strlen(buf);
+
+				snprintf(buf + len, sizeof buf - len, "%s%s", j ? ", " : "", args[j]);
+			}
+
+			/* action, timeout, action, final timeout */
+			{
+				size_t len = strlen(buf);
+
+				snprintf(buf + len, sizeof buf - len, ", %s), 500, %s), 125)", args[nr_layers], args[nr_layers]);
+			}
+
+			printf("Generated: %s\n", buf);
+
+			if (parse_fn(buf, &fn, args, &nargs)) {
+				err("failed to parse %s", buf);
+				return -1;
+			}
+		}
+
+		uint8_t op = get_layer_list_op(fn);
+
+		if (op) {
+			int j;
+			int layer_arg = 0;
+			int has_action = (op == OP_OVERLOAD_TIMEOUTL || op == OP_OVERLOAD_TIMEOUT_TAPL || op == OP_OVERLOADL || op == OP_PREFIXL);
+			int action_arg = -1;
+			size_t min_args = has_action ? 2 : 1;
+
+			if (nargs < min_args || nargs > MAX_DESCRIPTOR_ARGS) {
+				err("%s requires %zu to %d arguments", fn, min_args, MAX_DESCRIPTOR_ARGS);
+				return -1;
+			}
+
+			d->op = op;
+			d->nr_layers = 0;
+
+			for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++)
+				d->args[j].idx = -1;
+
+			/*
+			 * For overloadt2l:
+			 *
+			 *     overloadt2l(layer ..., action)
+			 *
+			 * The last argument is always the action.
+			 */
+			if (has_action)
+				action_arg = nargs - 1;
+
+			for (j = 0; j < (int)nargs; j++) {
+				int16_t li;
+
+				/*
+				 * Last argument is the action.
+				 * Store it after all layer arguments:
+				 *
+				 * args[0 ... nr_layers-1] = layers
+				 * args[nr_layers]         = action
+				 */
+				if (j == action_arg) {
+					struct descriptor desc;
+
+					if (parse_descriptor(args[j], &desc, config))
+						return -1;
+
+					if (config->nr_descriptors >= ARRAY_SIZE(config->descriptors)) {
+						err("maximum descriptors exceeded");
+						return -1;
+					}
+
+					config->descriptors[config->nr_descriptors] = desc;
+					d->args[layer_arg].idx = config->nr_descriptors++;
+					continue;
+				}
+
+				if (!strcmp(args[j], "main")) {
+					err("the main layer cannot be used in %s", fn);
+					return -1;
+				}
+
+				li = config_get_layer_index(config, args[j]);
+
+				if (li == -1 || config->layers[li].type == LT_LAYOUT) {
+					err("%s is not a valid layer", args[j]);
+					return -1;
+				}
+
+				if (layer_arg >= MAX_DESCRIPTOR_ARGS) {
+					err("too many layers in %s", fn);
+					return -1;
+				}
+
+				d->args[layer_arg++].idx = li;
+			}
+
+			if (layer_arg == 0) {
+				err("%s requires at least one layer", fn);
+				return -1;
+			}
+
+			d->nr_layers = layer_arg;
+
+			return 0;
 		}
 
 		for (i = 0; i < ARRAY_SIZE(actions); i++) {

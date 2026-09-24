@@ -36,6 +36,12 @@ struct output {
 	void (*on_layer_change) (const struct keyboard *kbd, const struct layer *layer, uint8_t active);
 };
 
+struct layer_trigger {
+	uint8_t other_key_pressed;
+	uint8_t toggle_idx[MAX_DESCRIPTOR_ARGS];
+	uint8_t toggle_count;
+};
+
 /* May correspond to more than one physical input device. */
 struct keyboard {
 	const struct config *original_config;
@@ -133,6 +139,21 @@ struct keyboard {
 		uint8_t oneshot_depth;
 	} layer_state[MAX_LAYERS];
 
+	int layer_trigger_depth;
+	struct layer_trigger layer_trigger_stack[MAX_DESCRIPTOR_ARGS];
+	int mod_count;
+	int mod_idx[MAX_DESCRIPTOR_ARGS];
+	int active_idx[MAX_DESCRIPTOR_ARGS];
+
+	enum activation {
+		NONE = 0,
+		TAP,
+		HELD,
+		SWAP,
+		TOGGLE,
+	} activation;
+
+	struct descriptor *layer_prefix;
 	struct descriptor last_repeatable_action;
 	struct descriptor repeat_reverse_action;
 

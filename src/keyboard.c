@@ -408,14 +408,106 @@ static void execute_command(const char *cmd)
 	execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
 }
 
+static int is_modifier_layer(struct keyboard *kbd, int idx)
+{
+	const char *name = kbd->config.layers[idx].name;
+
+	return name && (!strcmp(name, "shift") || !strcmp(name, "control") || !strcmp(name, "meta") || !strcmp(name, "alt") || !strcmp(name, "altgr"));
+}
+
+static void clear_mod_layers(struct keyboard *kbd)
+{
+	for (int j = 0; j < kbd->mod_count; j++) {
+		int idx = kbd->mod_idx[j];
+
+		if (kbd->layer_state[idx].toggled)
+			kbd->layer_state[idx].toggled = 0;
+
+		kbd->mod_idx[j] = -1;
+	}
+
+	kbd->mod_count = 0;
+}
+
+static void add_mod_layer(struct keyboard *kbd, int idx)
+{
+	for (int i = 0; i < kbd->mod_count; i++) {
+		if (kbd->mod_idx[i] == idx)
+			return;
+	}
+
+	if (kbd->mod_count < MAX_DESCRIPTOR_ARGS)
+		kbd->mod_idx[kbd->mod_count++] = idx;
+}
+
+static void toggle_mod_layer(struct keyboard *kbd, int idx)
+{
+	for (int i = 0; i < kbd->mod_count; i++) {
+		if (kbd->mod_idx[i] == idx) {
+			for (int j = i; j < kbd->mod_count - 1; j++)
+				kbd->mod_idx[j] = kbd->mod_idx[j + 1];
+
+			kbd->mod_count--;
+			kbd->mod_idx[kbd->mod_count] = -1;
+			kbd->layer_state[idx].toggled = 0;
+			kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 0);
+			return;
+		}
+	}
+
+	if (kbd->mod_count < MAX_DESCRIPTOR_ARGS) {
+		kbd->mod_idx[kbd->mod_count++] = idx;
+		kbd->layer_state[idx].toggled = 1;
+		kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 1);
+	}
+}
+
+static int add_descriptor_mod_layers(struct keyboard *kbd, struct descriptor *d)
+{
+	int added = 0;
+
+	for (int j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+		int idx = d->args[j].idx;
+
+		if (idx == -1)
+			break;
+
+		if (is_modifier_layer(kbd, idx)) {
+			add_mod_layer(kbd, idx);
+			added = 1;
+		}
+	}
+
+	return added;
+}
+
+static void remove_toggle_idx(struct layer_trigger *lt, int idx)
+{
+	for (size_t i = 0; i < lt->toggle_count; i++) {
+		if (lt->toggle_idx[i] != idx)
+			continue;
+
+		lt->toggle_idx[i] = lt->toggle_idx[--lt->toggle_count];
+		return;
+	}
+}
+
 static void clear_oneshot(struct keyboard *kbd)
 {
 	size_t i = 0;
 
 	for (i = 0; i < kbd->config.nr_layers; i++)
 		while (kbd->layer_state[i].oneshot_depth) {
+
+			if (kbd->layer_state[i].toggled) {
+				kbd->layer_state[i].toggled = 0;
+				kbd->layer_prefix = NULL;
+			}
+
 			deactivate_layer(kbd, i);
 			kbd->layer_state[i].oneshot_depth--;
+			kbd->activation = NONE;
+			clear_mod_layers(kbd);
 		}
 
 	kbd->oneshot_latch = 0;
@@ -438,7 +530,12 @@ static void clear(struct keyboard *kbd)
 	}
 
 	kbd->active_macro = NULL;
+	kbd->active_idx[0] = -1;
+	kbd->layer_trigger_depth = 0;
+	kbd->activation = NONE;
+	kbd->layer_prefix = NULL;
 
+	clear_mod_layers(kbd);
 	reset_keystate(kbd);
 }
 
@@ -567,6 +664,33 @@ static int is_repeat_prefix(uint8_t code, uint8_t mods)
 		return 1;
 
 	return 0;
+}
+
+static void resolve_toggle_on_layer(struct keyboard *kbd, struct layer_trigger *lt, long time)
+{
+	int should_update_mod = 0;
+
+	for (size_t i = 0; i < lt->toggle_count; i++) {
+		int idx = lt->toggle_idx[i];
+
+		if (lt->other_key_pressed) {
+			kbd->layer_state[idx].toggled = 0;
+			kbd->layer_prefix = NULL;
+			deactivate_layer(kbd, idx);
+			clear_mod_layers(kbd);
+			should_update_mod = 1;
+		} else {
+			kbd->layer_state[idx].oneshot_depth++;
+
+			if (kbd->config.oneshot_timeout) {
+				kbd->oneshot_timeout = time + kbd->config.oneshot_timeout;
+				schedule_timeout(kbd, kbd->oneshot_timeout);
+			}
+		}
+	}
+
+	if (should_update_mod)
+		update_mods(kbd, -1, 0);
 }
 
 static long process_descriptor(struct keyboard *kbd, uint8_t code,
@@ -1016,6 +1140,464 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 		}
 
 		break;
+	case OP_PREFIX: {
+		int j;
+		struct descriptor *action = &kbd->config.descriptors[d->args[0].idx];
+
+		if (pressed) {
+			size_t i;
+			struct cache_entry *ce = NULL;
+
+			for (i = 0; i < CACHE_SIZE; i++) {
+				uint8_t code = kbd->cache[i].code;
+				int layer = kbd->cache[i].layer;
+				int type = kbd->config.layers[layer].type;
+
+				if (code && layer == dl && type == LT_NORMAL && layer != 0) {
+					ce = &kbd->cache[i];
+					break;
+				}
+			}
+
+			if (ce) {
+				ce->d.op = OP_LAYERL;
+				ce->d.args[0].idx = -1;
+				deactivate_layer(kbd, dl);
+				update_mods(kbd, -1, 0);
+				kbd->layer_prefix = action;
+			}
+		}
+
+		break;
+	}
+	case OP_PREFIXL: {
+		int j;
+
+		int nr_layers = d->nr_layers;
+		struct descriptor *action = &kbd->config.descriptors[d->args[nr_layers].idx];
+		int prefix_oneshot = 0;
+		if (pressed) {
+
+			struct layer_trigger *lt = NULL;
+
+			if (kbd->layer_trigger_depth > 0)
+				lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+
+			for (int j = 0; j < nr_layers; j++) {
+				idx = d->args[j].idx;
+				if (idx == -1)
+					break;
+
+				if (is_modifier_layer(kbd, idx)) {
+					add_mod_layer(kbd, idx);
+					continue;
+				}
+
+				kbd->layer_state[idx].toggled = !kbd->layer_state[idx].toggled;
+
+				if (kbd->layer_state[idx].toggled) {
+					activate_layer(kbd, code, idx);
+
+					if (lt && lt->toggle_count < MAX_DESCRIPTOR_ARGS)
+						lt->toggle_idx[lt->toggle_count++] = idx;
+
+					kbd->layer_prefix = action;
+				} else {
+					deactivate_layer(kbd, idx);
+
+					if (lt)
+						remove_toggle_idx(lt, idx);
+
+					prefix_oneshot = 1;
+				}
+			}
+
+			if (prefix_oneshot) {
+				kbd->layer_prefix = NULL;
+				clear_mod_layers(kbd);
+			}
+
+			update_mods(kbd, -1, 0);
+			clear_oneshot(kbd);
+		}
+		break;
+	}
+	case OP_ONESHOTL: {
+		int j;
+		int should_update_mod = 0;
+		int should_clear_mod = 0;
+
+		if (pressed) {
+			for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+				idx = d->args[j].idx;
+
+				if (idx == -1)
+					break;
+
+				if (kbd->layer_prefix && is_modifier_layer(kbd, idx)) {
+					add_mod_layer(kbd, idx);
+				} else {
+					should_update_mod = 1;
+					activate_layer(kbd, code, idx);
+				}
+			}
+
+			if (should_update_mod)
+				update_mods(kbd, dl, 0);
+
+			kbd->oneshot_latch = 1;
+
+			if (kbd->layer_prefix)
+				kbd->activation = HELD;
+
+		} else {
+
+			if (kbd->oneshot_latch) {
+
+				if (kbd->layer_prefix)
+					kbd->activation = TAP;
+
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = d->args[j].idx;
+
+					if (idx == -1)
+						break;
+
+					if (kbd->layer_prefix && is_modifier_layer(kbd, idx)) {
+						add_mod_layer(kbd, idx);
+					} else {
+						kbd->layer_state[idx].oneshot_depth++;
+					}
+				}
+
+				if (kbd->config.oneshot_timeout) {
+					kbd->oneshot_timeout = time + kbd->config.oneshot_timeout;
+					schedule_timeout(kbd, kbd->oneshot_timeout);
+				}
+			} else {
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = d->args[j].idx;
+
+					if (idx == -1)
+						break;
+
+					if (kbd->layer_prefix && is_modifier_layer(kbd, idx)) {
+						should_clear_mod = 1;
+					} else {
+						should_update_mod = 1;
+						deactivate_layer(kbd, idx);
+					}
+				}
+
+				if (should_update_mod)
+					update_mods(kbd, dl, 0);
+
+				if (should_clear_mod)
+					clear_mod_layers(kbd);
+			}
+		}
+
+		break;
+	}
+	case OP_TOGGLEL: {
+		int j;
+		int should_update_mod = 0;
+		int should_clear_mod = 0;
+
+		if (pressed) {
+			struct layer_trigger *lt = NULL;
+
+			if (kbd->layer_trigger_depth > 0)
+				lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+
+			for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+				idx = d->args[j].idx;
+
+				if (idx == -1)
+					break;
+
+				if (kbd->layer_prefix && is_modifier_layer(kbd, idx)) {
+					toggle_mod_layer(kbd, idx);
+				} else {
+
+					should_update_mod = 1;
+					int was_active = 0;
+
+					for (size_t k = 0; k < MAX_DESCRIPTOR_ARGS; k++) {
+						if (kbd->active_idx[k] == idx) {
+
+							if (kbd->layer_state[idx].active > 0)
+								deactivate_layer(kbd, idx);
+							else
+								activate_layer(kbd, code, idx);
+
+							was_active = 1;
+							break;
+						}
+					}
+
+					if (was_active)
+						continue;
+
+					if (kbd->layer_state[idx].oneshot_depth) {
+						if (kbd->layer_state[idx].toggled)
+							kbd->layer_state[idx].toggled = 0;
+						deactivate_layer(kbd, idx);
+						kbd->layer_state[idx].oneshot_depth--;
+					}
+
+					kbd->layer_state[idx].toggled = !kbd->layer_state[idx].toggled;
+
+					if (kbd->layer_state[idx].toggled) {
+						activate_layer(kbd, code, idx);
+						if (lt && lt->toggle_count < MAX_DESCRIPTOR_ARGS)
+							lt->toggle_idx[lt->toggle_count++] = idx;
+					} else {
+						deactivate_layer(kbd, idx);
+						if (lt)
+							remove_toggle_idx(lt, idx);
+					}
+				}
+			}
+
+			if (should_update_mod) {
+				update_mods(kbd, -1, 0);
+				clear_oneshot(kbd);
+			}
+
+			if (should_clear_mod)
+				clear_mod_layers(kbd);
+		}
+		break;
+	}
+	case OP_SWAPL: {
+		int j;
+
+		if (pressed) {
+			size_t i;
+			struct cache_entry *ce = NULL;
+
+			if (kbd->layer_state[dl].toggled) {
+				deactivate_layer(kbd, dl);
+				kbd->layer_state[dl].toggled = 0;
+
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = d->args[j].idx;
+					if (idx == -1)
+						break;
+
+					activate_layer(kbd, code, idx);
+					kbd->layer_state[idx].toggled = 1;
+				}
+
+				update_mods(kbd, -1, 0);
+
+			} else if (kbd->layer_state[dl].oneshot_depth) {
+				deactivate_layer(kbd, dl);
+				kbd->layer_state[dl].oneshot_depth--;
+
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = d->args[j].idx;
+					if (idx == -1)
+						break;
+
+					activate_layer(kbd, code, idx);
+					kbd->layer_state[idx].oneshot_depth++;
+				}
+
+				update_mods(kbd, -1, 0);
+
+			} else {
+				for (i = 0; i < CACHE_SIZE; i++) {
+					uint8_t code = kbd->cache[i].code;
+					int layer = kbd->cache[i].layer;
+					int type = kbd->config.layers[layer].type;
+
+					if (code && layer == dl && type == LT_NORMAL && layer != 0) {
+						ce = &kbd->cache[i];
+						break;
+					}
+				}
+
+				if (ce) {
+					ce->d.op = OP_LAYERL;
+
+					for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++)
+						ce->d.args[j].idx = d->args[j].idx;
+
+					deactivate_layer(kbd, dl);
+
+					for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+						idx = ce->d.args[j].idx;
+						if (idx == -1)
+							break;
+
+						activate_layer(kbd, ce->code, idx);
+					}
+					update_mods(kbd, -1, 0);
+				}
+			}
+		}
+
+		break;
+	}
+	case OP_LAYERL: {
+		int j;
+		struct layer_trigger *lt;
+
+		if (pressed) {
+			lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth++];
+			lt->other_key_pressed = 0;
+			lt->toggle_count = 0;
+			kbd->activation = HELD;
+
+			for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+				idx = d->args[j].idx;
+				if (idx == -1)
+					break;
+				kbd->active_idx[j] = -1;
+
+				const char *name = kbd->config.layers[idx].name;
+				activate_layer(kbd, code, idx);
+				kbd->active_idx[j] = idx;
+			}
+
+		} else {
+			kbd->activation = NONE;
+			int should_clear_toggle = 0;
+			lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+
+			for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+				idx = d->args[j].idx;
+				if (idx == -1)
+					break;
+
+				const char *name = kbd->config.layers[idx].name;
+				deactivate_layer(kbd, idx);
+
+				if (!kbd->layer_state[idx].toggled) {
+					kbd->active_idx[j] = -1;
+					should_clear_toggle = 1;
+				}
+			}
+
+			if (should_clear_toggle)
+				resolve_toggle_on_layer(kbd, lt, time);
+
+			if (d->args[0].idx == -1)
+				kbd->layer_prefix = NULL;
+
+			kbd->layer_trigger_depth--;
+		}
+
+		if (kbd->last_pressed_code == code) {
+			kbd->inhibit_modifier_guard = 1;
+			update_mods(kbd, -1, 0);
+			kbd->inhibit_modifier_guard = 0;
+		} else {
+			update_mods(kbd, -1, 0);
+		}
+
+		break;
+	}
+	case OP_OVERLOADL: {
+		int j;
+		int nr_layers = d->nr_layers;
+		struct layer_trigger *lt;
+		action = &kbd->config.descriptors[d->args[nr_layers].idx];
+
+		if (pressed) {
+			kbd->overload_start_time = time;
+
+			lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth++];
+			lt->other_key_pressed = 0;
+			lt->toggle_count = 0;
+			kbd->activation = HELD;
+
+			for (j = 0; j < nr_layers; j++) {
+				idx = d->args[j].idx;
+				if (idx == -1)
+					break;
+				kbd->active_idx[j] = -1;
+				activate_layer(kbd, code, d->args[j].idx);
+				kbd->active_idx[j] = idx;
+			}
+
+			update_mods(kbd, -1, 0);
+
+		} else {
+			kbd->activation = NONE;
+			int should_clear_toggle = 0;
+			lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+
+			for (j = 0; j < nr_layers; j++) {
+				idx = d->args[j].idx;
+				if (idx == -1)
+					break;
+
+				const char *name = kbd->config.layers[idx].name;
+				deactivate_layer(kbd, idx);
+
+				if (!kbd->layer_state[idx].toggled) {
+					kbd->active_idx[j] = -1;
+					should_clear_toggle = 1;
+				}
+			}
+
+			update_mods(kbd, -1, 0);
+
+			kbd->layer_trigger_depth--;
+
+			if (kbd->last_pressed_code == code && (!kbd->config.overload_tap_timeout || ((time - kbd->overload_start_time) < kbd->config.overload_tap_timeout))) {
+				if (action->op == OP_MACRO) {
+					/*
+					 * Macro release relies on event logic, so we can't just synthesize a
+					 * descriptor release.
+					 */
+					struct macro *macro = &kbd->config.macros[action->args[0].idx];
+					execute_macro(kbd, dl, macro);
+				} else {
+					process_descriptor(kbd, code, action, dl, 1, time);
+					process_descriptor(kbd, code, action, dl, 0, time);
+				}
+			} else {
+				if (should_clear_toggle)
+					resolve_toggle_on_layer(kbd, lt, time);
+			}
+		}
+		break;
+	}
+	case OP_OVERLOAD_TIMEOUT_TAPL:
+	case OP_OVERLOAD_TIMEOUTL:
+		if (pressed) {
+			int j;
+			int nr_layers = d->nr_layers;
+			struct descriptor *action = &kbd->config.descriptors[d->args[nr_layers].idx];
+
+			if (kbd->activation == HELD && d->op == OP_OVERLOAD_TIMEOUT_TAPL) {
+				process_descriptor(kbd, code, action, dl, 1, time);
+				process_descriptor(kbd, code, action, dl, 0, time);
+			} else {
+				kbd->pending_overload.code = code;
+				kbd->pending_overload.resolve_on_interrupt = d->op == OP_OVERLOAD_TIMEOUT_TAPL;
+
+				kbd->pending_overload.dl = dl;
+				kbd->pending_overload.action1 = *action;
+
+				kbd->pending_overload.action2 = (struct descriptor){0};
+				kbd->pending_overload.action2.op = OP_LAYERL;
+
+				for (j = 0; j < nr_layers; j++)
+					kbd->pending_overload.action2.args[j].idx = d->args[j].idx;
+
+				kbd->pending_overload.action2.args[nr_layers].idx = -1;
+
+				kbd->pending_overload.expiration = time + kbd->config.overload_tap_timeout;
+
+				schedule_timeout(kbd, kbd->pending_overload.expiration);
+			}
+		}
+		break;
 	}
 
 	if (pressed)
@@ -1403,6 +1985,10 @@ static long process_event(struct keyboard *kbd, uint8_t code, int pressed, long 
 
 			lookup_descriptor(kbd, code, &d, &dl);
 
+			if (kbd->layer_trigger_depth > 0 && d.op != OP_TOGGLEL && d.op != OP_OVERLOAD_TIMEOUT_TAPL && d.op != OP_PREFIXL && d.op != OP_OVERLOADL) {
+				struct layer_trigger *lt = &kbd->layer_trigger_stack[kbd->layer_trigger_depth - 1];
+				lt->other_key_pressed = 1;
+			}
 			if (cache_set(kbd, code, &(struct cache_entry) { .d = d, .dl = dl, .layer = 0 }))
 				goto exit;
 		} else {
