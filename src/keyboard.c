@@ -256,11 +256,10 @@ static void lookup_descriptor(struct keyboard *kbd, uint8_t code,
 static void deactivate_layer(struct keyboard *kbd, int idx)
 {
 	dbg("Deactivating layer %s", kbd->config.layers[idx].name);
-
-	assert(kbd->layer_state[idx].active > 0);
-	kbd->layer_state[idx].active--;
-
-	kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 0);
+	if (kbd->layer_state[idx].active > 0) {
+      kbd->layer_state[idx].active--;
+      kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 0);
+  }
 }
 
 /*
@@ -280,6 +279,27 @@ static void activate_layer(struct keyboard *kbd, uint8_t code, int idx)
 		ce->layer = idx;
 
 	kbd->output.on_layer_change(kbd, &kbd->config.layers[idx], 1);
+}
+
+static void deactivate_layer_prefix(struct keyboard *kbd, int idx)
+{
+	dbg("Deactivating layer %s", kbd->config.layers[idx].name);
+
+	if (kbd->layer_state[idx].active > 0) {
+      kbd->layer_state[idx].active--;
+  }
+}
+
+static void activate_layer_prefix(struct keyboard *kbd, uint8_t code, int idx)
+{
+	dbg("Activating layer %s", kbd->config.layers[idx].name);
+	struct cache_entry *ce;
+
+	kbd->layer_state[idx].activation_time = get_time();
+	kbd->layer_state[idx].active++;
+
+	if ((ce = cache_get(kbd, code)))
+		ce->layer = idx;
 }
 
 /* Returns:
@@ -721,6 +741,24 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			macro = &kbd->config.macros[d->args[1].idx];
 			execute_macro(kbd, dl, macro);
 			break;
+		case OP_KEYSEQUENCE:
+      if (kbd->layer_prefix) {
+          struct descriptor *prefix = kbd->layer_prefix;
+
+          if (prefix->op == OP_MACRO) {
+            struct macro *macro = &kbd->config.macros[prefix->args[0].idx];
+            execute_macro(kbd, dl, macro);
+          } else if (prefix->op == OP_KEYSEQUENCE) {
+              uint8_t prefix_code = prefix->args[0].code;
+              uint8_t prefix_mods = prefix->args[1].mods;
+
+              update_mods(kbd, -1, prefix_mods);
+              send_key(kbd, prefix_code, 1);
+              send_key(kbd, prefix_code, 0);
+              update_mods(kbd, -1, 0);
+          }
+
+      }
 		default:
 			break;
 		}
@@ -747,6 +785,32 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			 */
 			if (kbd->keystate[new_code])
 				send_key(kbd, new_code, 0);
+
+			if (kbd->layer_prefix && kbd->mod_idx[0] != -1) {
+
+				int idx;
+				int j;
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = kbd->mod_idx[j];
+					if (idx == -1)
+						break;
+					activate_layer_prefix(kbd, 0, idx);
+				}
+
+				if (kbd->activation == TAP) {
+					for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+						idx = kbd->mod_idx[j];
+						if (idx == -1)
+							break;
+						kbd->layer_state[idx].oneshot_depth++;
+					}
+
+					if (kbd->config.oneshot_timeout) {
+						kbd->oneshot_timeout = time + kbd->config.oneshot_timeout;
+						schedule_timeout(kbd, kbd->oneshot_timeout);
+					}
+				}
+			}
 
 			active_mods = update_mods(kbd, dl, mods);
 
@@ -777,6 +841,18 @@ static long process_descriptor(struct keyboard *kbd, uint8_t code,
 			} else if (is_repeat_prefix(new_code, kbd->last_repeatable_action.args[1].mods)) {
 				kbd->repeat_prefix_code = new_code;
 				kbd->repeat_prefix_mods = kbd->last_repeatable_action.args[1].mods;
+			}
+
+			if (kbd->layer_prefix && kbd->mod_idx[0] != -1 && kbd->activation != TAP) {
+				int idx;
+				int j;
+				for (j = 0; j < MAX_DESCRIPTOR_ARGS; j++) {
+					idx = kbd->mod_idx[j];
+
+					if (idx == -1)
+						break;
+					deactivate_layer_prefix(kbd, idx);
+				}
 			}
 
 			update_mods(kbd, -1, 0);
